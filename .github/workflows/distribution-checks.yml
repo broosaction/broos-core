@@ -7,7 +7,7 @@ on:
       - 'docs/DISTRIBUTION.md'
       - '.github/workflows/distribution-checks.yml'
   push:
-    branches: [master]
+    branches: [master, broos/preview-packaging]
     paths:
       - 'distribution/**'
       - 'docs/DISTRIBUTION.md'
