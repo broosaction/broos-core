@@ -11,7 +11,7 @@ require_root() { [ "$(id -u)" -eq 0 ] || fail 'root is required'; }
 
 package_manifest() {
   dpkg-query -W -f='${binary:Package}\t${Version}\n' \
-    'broos-*' 'webmin' 'webmin-virtual-server' 2>/dev/null || true
+    'broos-*' 2>/dev/null || true
 }
 
 create_snapshot() {
@@ -36,7 +36,7 @@ create_snapshot() {
     tar -czf "$path/configuration.tar.gz" --files-from /dev/null
   fi
 
-  for deb in /var/cache/apt/archives/broos-*.deb /var/cache/apt/archives/webmin*.deb; do
+  for deb in /var/cache/apt/archives/broos-*.deb; do
     [ -f "$deb" ] && cp -p "$deb" "$path/packages/"
   done
   while IFS="$(printf '\t')" read -r package version; do
