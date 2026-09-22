@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+TIMEOUT=${HEALTH_TIMEOUT_SECONDS:-300}
+CONSOLE_ROOT=${BROOS_CONSOLE_ROOT:-/usr/share/broos-console}
+CORE_URL=${BROOS_CORE_HEALTH_URL:-http://127.0.0.1:8087/api/v1/health}
+
+log() { printf 'broos-healthcheck: %s\n' "$*"; }
+fail() { printf 'broos-healthcheck: error: %s\n' "$*" >&2; exit 1; }
+
+deadline=$(( $(date +%s) + TIMEOUT ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  core=1; console=0
+  [ -s "$CONSOLE_ROOT/index.html" ] && [ -s "$CONSOLE_ROOT/healthz" ] && console=1
+  if systemctl list-unit-files broos-core.service >/dev/null 2>&1; then
+    core=0
+    systemctl is-active --quiet broos-core.service &&
+      curl --fail --silent --show-error --max-time 5 "$CORE_URL" >/dev/null && core=1 || true
+  fi
+  if [ "$core" -eq 1 ] && [ "$console" -eq 1 ]; then
+    log 'core and console are healthy'
+    exit 0
+  fi
+  sleep 5
+done
+fail "health gates did not pass within ${TIMEOUT}s"

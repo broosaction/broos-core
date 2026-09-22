@@ -1,0 +1,76 @@
+name: Distribution checks
+
+on:
+  pull_request:
+    paths:
+      - 'distribution/**'
+      - 'docs/DISTRIBUTION.md'
+      - '.github/workflows/distribution-checks.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'distribution/**'
+      - 'docs/DISTRIBUTION.md'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate updater shell
+        run: |
+          sh -n distribution/broos-release
+          shellcheck distribution/broos-release
+      - name: Validate systemd units
+        run: |
+          systemd-analyze verify distribution/broos-update.service
+          systemd-analyze verify distribution/broos-update.timer
+      - name: Validate JSON schema syntax
+        run: jq empty distribution/channel.schema.json
+      - name: Build release package smoke test
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apt-utils gnupg rsync
+          mkdir -p ../console-fixture/dist
+          printf '{"lockfileVersion":3}' > ../console-fixture/package-lock.json
+          printf '<!doctype html><title>Broos</title>' > ../console-fixture/dist/index.html
+          export GNUPGHOME="$(mktemp -d)"
+          chmod 700 "$GNUPGHOME"
+          gpg --batch --pinentry-mode loopback --passphrase '' \
+            --quick-generate-key 'Broos CI Preview <ci@broos.app>' rsa2048 sign 1d
+          fingerprint=$(gpg --batch --with-colons --list-secret-keys |
+            awk -F: '$1 == "fpr" { print $10; exit }')
+          gpg --batch --export "$fingerprint" > ../console-fixture/public.gpg
+          mkdir -p /tmp/fake-bin
+          printf '#!/bin/sh\nexit 0\n' > /tmp/fake-bin/npm
+          chmod +x /tmp/fake-bin/npm
+          PATH="/tmp/fake-bin:$PATH" BROOS_CONSOLE_ROOT="$PWD/../console-fixture" \
+            BROOS_ARCHIVE_KEY_FILE="$PWD/../console-fixture/public.gpg" \
+            ./distribution/packaging/build-packages.sh 0.1.0-ci
+          dpkg-deb --info build/packages/broos-release_0.1.0-ci_all.deb
+          dpkg-deb --info build/packages/broos-console_0.1.0-ci_all.deb
+          BROOS_APT_SIGNING_KEY="$fingerprint" \
+            BROOS_ARCHIVE_PUBLIC_KEY_FILE="$PWD/../console-fixture/public.gpg" \
+            BROOS_RELEASE_CHANNEL=preview \
+            ./distribution/publisher/publish-apt.sh build/packages build/apt-public
+          gpgv --keyring "$PWD/../console-fixture/public.gpg" \
+            build/apt-public/dists/preview/InRelease
+          test -s build/apt-public/dists/preview/main/binary-amd64/Packages
+          test -s build/apt-public/dists/preview/main/binary-arm64/Packages
+          printf 'deb [signed-by=%s] file://%s preview main\n' \
+            "$PWD/../console-fixture/public.gpg" "$PWD/build/apt-public" > build/test.list
+          sudo apt-get update -o Dir::Etc::sourcelist="$PWD/build/test.list" \
+            -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+
+  secret-scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify no private signing material is committed
+        run: |
+          ! git grep -I -E 'BEGIN (PGP|OPENSSH|RSA|EC) PRIVATE KEY'

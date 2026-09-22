@@ -1,0 +1,21 @@
+[Unit]
+Description=Check and safely apply Broos Cloud updates
+Documentation=https://broos.app/docs/operations/updates
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/broos-release automatic
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=full
+ReadWritePaths=/etc /var/lib/broos-release /var/cache/apt /var/lib/apt /var/log
+LockPersonality=true
+NoNewPrivileges=true
+TimeoutStartSec=45min

@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+
+STATE_DIR=${BROOS_RELEASE_STATE_DIR:-/var/lib/broos-release}
+SNAPSHOT_DIR=$STATE_DIR/snapshots
+KEEP=${RETAIN_RELEASES:-2}
+
+log() { printf 'broos-snapshot: %s\n' "$*"; }
+fail() { printf 'broos-snapshot: error: %s\n' "$*" >&2; exit 1; }
+require_root() { [ "$(id -u)" -eq 0 ] || fail 'root is required'; }
+
+package_manifest() {
+  dpkg-query -W -f='${binary:Package}\t${Version}\n' \
+    'broos-*' 'webmin' 'webmin-virtual-server' 2>/dev/null || true
+}
+
+create_snapshot() {
+  require_root
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  path=$SNAPSHOT_DIR/$stamp
+  install -d -m 0700 "$path/packages"
+  package_manifest > "$path/packages.tsv"
+  dpkg --get-selections > "$path/dpkg-selections.txt"
+  uname -a > "$path/uname.txt"
+  date -u +%FT%TZ > "$path/created-at"
+
+  # Configuration is sufficient for package rollback. Customer content and
+  # databases remain protected by the separately configured backup policy.
+  set --
+  for candidate in /etc/broos /etc/webmin /etc/virtualmin /etc/default/broos-*; do
+    [ -e "$candidate" ] && set -- "$@" "$candidate"
+  done
+  if [ "$#" -gt 0 ]; then
+    tar --acls --xattrs --numeric-owner -czf "$path/configuration.tar.gz" "$@"
+  else
+    tar -czf "$path/configuration.tar.gz" --files-from /dev/null
+  fi
+
+  for deb in /var/cache/apt/archives/broos-*.deb /var/cache/apt/archives/webmin*.deb; do
+    [ -f "$deb" ] && cp -p "$deb" "$path/packages/"
+  done
+  while IFS="$(printf '\t')" read -r package version; do
+    [ -n "$package" ] && [ -n "$version" ] || continue
+    (cd "$path/packages" && apt-get download "$package=$version") ||
+      fail "could not cache rollback package $package=$version"
+  done < "$path/packages.tsv"
+  find "$path/packages" -maxdepth 1 -type f -name '*.deb' | grep -q . ||
+    fail 'no rollback packages could be cached'
+  ln -sfn "$path" "$STATE_DIR/latest-snapshot"
+  prune_snapshots
+  log "$path"
+}
+
+prune_snapshots() {
+  [ -d "$SNAPSHOT_DIR" ] || return 0
+  count=0
+  find "$SNAPSHOT_DIR" -mindepth 1 -maxdepth 1 -type d -print | sort -r | while IFS= read -r path; do
+    count=$((count + 1))
+    [ "$count" -le "$KEEP" ] || rm -rf "$path"
+  done
+}
+
+restore_snapshot() {
+  require_root
+  path=${1:-}
+  [ -n "$path" ] || path=$(readlink -f "$STATE_DIR/latest-snapshot" 2>/dev/null || true)
+  [ -d "$path" ] || fail 'snapshot not found'
+  [ -f "$path/configuration.tar.gz" ] || fail 'snapshot configuration archive is missing'
+
+  debs=$(find "$path/packages" -maxdepth 1 -type f -name '*.deb' -print)
+  [ -n "$debs" ] || fail 'snapshot contains no cached packages; refusing partial rollback'
+  # shellcheck disable=SC2086
+  dpkg -i $debs || apt-get -f install --yes
+  tar --acls --xattrs --numeric-owner -xzf "$path/configuration.tar.gz" -C /
+  systemctl daemon-reload
+  systemctl try-restart broos-core.service 2>/dev/null || true
+  log "restored $path"
+}
+
+case ${1:-create} in
+  create) create_snapshot ;;
+  restore) restore_snapshot "${2:-}" ;;
+  *) fail 'usage: broos-snapshot create | restore [snapshot-directory]' ;;
+esac

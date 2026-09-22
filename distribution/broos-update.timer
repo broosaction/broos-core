@@ -1,0 +1,11 @@
+[Unit]
+Description=Broos Cloud update check timer
+
+[Timer]
+OnCalendar=*-*-* 01:15:00
+RandomizedDelaySec=45m
+Persistent=true
+Unit=broos-update.service
+
+[Install]
+WantedBy=timers.target

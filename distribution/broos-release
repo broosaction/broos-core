@@ -1,0 +1,155 @@
+#!/bin/sh
+set -eu
+
+PROGRAM=broos-release
+CONFIG_FILE=${BROOS_RELEASE_CONFIG:-/etc/broos/release.conf}
+STATE_DIR=${BROOS_RELEASE_STATE_DIR:-/var/lib/broos-release}
+LOCK_FILE=${BROOS_RELEASE_LOCK_FILE:-/run/lock/broos-release.lock}
+APT_GET=${APT_GET:-apt-get}
+APT_CACHE=${APT_CACHE:-apt-cache}
+SNAPSHOT_HELPER=${BROOS_SNAPSHOT_HELPER:-/usr/lib/broos-release/broos-snapshot}
+HEALTHCHECK_HELPER=${BROOS_HEALTHCHECK_HELPER:-/usr/lib/broos-release/broos-healthcheck}
+
+log() { printf '%s: %s\n' "$PROGRAM" "$*"; }
+fail() { printf '%s: error: %s\n' "$PROGRAM" "$*" >&2; exit 1; }
+
+load_config() {
+  CHANNEL=stable
+  AUTOMATIC_DOWNLOAD=yes
+  AUTOMATIC_APPLY=no
+  MAINTENANCE_WINDOW_START=02:00
+  MAINTENANCE_WINDOW_END=04:00
+  HEALTH_TIMEOUT_SECONDS=300
+  RETAIN_RELEASES=2
+  UPDATE_ORIGIN=Broos
+  UPDATE_LABEL='Broos Cloud'
+  BROOS_PACKAGES='broos-release broos-console'
+  if [ -r "$CONFIG_FILE" ]; then
+    # The package owns this root-writable file. Do not point it at user content.
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+  fi
+  case "$CHANNEL" in stable|preview|edge) ;; *) fail "invalid channel: $CHANNEL" ;; esac
+  case " $BROOS_PACKAGES " in *' broos-release '*) ;; *) fail 'BROOS_PACKAGES must include broos-release' ;; esac
+  for package in $BROOS_PACKAGES; do
+    case "$package" in broos-release|broos-console|broos-core|broos-virtualmin-compat) ;;
+      *) fail "unsupported package in BROOS_PACKAGES: $package" ;;
+    esac
+  done
+}
+
+require_root() { [ "$(id -u)" -eq 0 ] || fail 'this operation requires root'; }
+
+ensure_repository() {
+  source_file=/etc/apt/sources.list.d/broos.sources
+  key_file=/usr/share/keyrings/broos-archive-keyring.gpg
+  [ -s "$source_file" ] || fail "missing Broos APT source: $source_file"
+  [ -s "$key_file" ] || fail "missing Broos archive key: $key_file"
+  grep -q '^Signed-By: /usr/share/keyrings/broos-archive-keyring.gpg$' "$source_file" ||
+    fail 'repository is not pinned to the Broos archive key'
+  ! grep -Eqi 'trusted[[:space:]]*=[[:space:]]*yes|allow-insecure' "$source_file" ||
+    fail 'insecure APT repository options are forbidden'
+}
+
+with_lock() {
+  command -v flock >/dev/null 2>&1 || fail 'flock is required'
+  mkdir -p "$(dirname "$LOCK_FILE")" "$STATE_DIR"
+  exec 9>"$LOCK_FILE"
+  flock -n 9 || fail 'another Broos update is already running'
+}
+
+check_updates() {
+  ensure_repository
+  "$APT_GET" update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/broos.sources \
+    -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+  candidate=$($APT_CACHE policy broos-release | awk '/Candidate:/ {print $2}')
+  installed=$($APT_CACHE policy broos-release | awk '/Installed:/ {print $2}')
+  log "channel=$CHANNEL installed=${installed:-unknown} candidate=${candidate:-unknown}"
+  [ -n "${candidate:-}" ] && [ "$candidate" != '(none)' ] || fail 'no signed Broos release candidate found'
+  if [ "$candidate" = "$installed" ]; then rm -f "$STATE_DIR/candidate"; log 'already current'; return 0; fi
+  printf '%s\n' "$candidate" > "$STATE_DIR/candidate"
+  log "update available: $candidate"
+}
+
+download_updates() {
+  check_updates
+  [ -f "$STATE_DIR/candidate" ] || return 0
+  # Package names are validated by load_config before word splitting here.
+  # shellcheck disable=SC2086
+  "$APT_GET" --download-only --yes install $BROOS_PACKAGES
+  log 'packages downloaded and signature-verified by APT'
+}
+
+apply_updates_locked() {
+  ensure_repository
+  [ -f "$STATE_DIR/candidate" ] || download_updates
+  if [ ! -f "$STATE_DIR/candidate" ]; then log 'no update to apply'; return 0; fi
+  [ -x "$SNAPSHOT_HELPER" ] || fail "missing snapshot helper: $SNAPSHOT_HELPER"
+  [ -x "$HEALTHCHECK_HELPER" ] || fail "missing health-check helper: $HEALTHCHECK_HELPER"
+  "$SNAPSHOT_HELPER" create
+  log 'installing previously verified Broos packages'
+  # shellcheck disable=SC2086
+  if ! "$APT_GET" --yes install $BROOS_PACKAGES; then
+    log 'package installation failed; starting rollback'
+    "$SNAPSHOT_HELPER" restore
+    fail 'update failed and the previous package/configuration snapshot was restored'
+  fi
+  if ! "$HEALTHCHECK_HELPER"; then
+    log 'health gates failed; starting rollback'
+    "$SNAPSHOT_HELPER" restore
+    "$HEALTHCHECK_HELPER" || fail 'rollback completed but health gates are still failing'
+    fail 'update failed health gates and was rolled back'
+  fi
+  rm -f "$STATE_DIR/candidate"
+  log 'update applied and health gates passed'
+}
+
+apply_updates() {
+  require_root; load_config; with_lock
+  apply_updates_locked
+}
+
+rollback() {
+  require_root; load_config; with_lock
+  [ -x "$SNAPSHOT_HELPER" ] || fail "missing snapshot helper: $SNAPSHOT_HELPER"
+  "$SNAPSHOT_HELPER" restore "${1:-}"
+  if [ -x "$HEALTHCHECK_HELPER" ]; then "$HEALTHCHECK_HELPER"; fi
+  log 'rollback completed'
+}
+
+status() {
+  load_config
+  installed=$($APT_CACHE policy broos-release 2>/dev/null | awk '/Installed:/ {print $2}')
+  printf 'channel: %s\ninstalled: %s\nautomatic-download: %s\nautomatic-apply: %s\n' \
+    "$CHANNEL" "${installed:-not-installed}" "$AUTOMATIC_DOWNLOAD" "$AUTOMATIC_APPLY"
+}
+
+automatic() {
+  require_root; load_config; with_lock
+  case "$AUTOMATIC_DOWNLOAD" in yes) download_updates ;; no) check_updates ;; *) fail 'AUTOMATIC_DOWNLOAD must be yes or no' ;; esac
+  if [ "$AUTOMATIC_APPLY" = yes ]; then
+    log 'automatic apply is enabled; use an external maintenance-window scheduler before production rollout'
+    apply_updates_locked
+  fi
+}
+
+usage() {
+  cat <<EOF
+Usage: $PROGRAM status|check|download|apply|rollback [snapshot]|automatic
+
+Updates are accepted only from the signed Broos repository. Apply creates a
+package/configuration snapshot and automatically rolls back failed health gates.
+EOF
+}
+
+command=${1:-status}
+case "$command" in
+  status) status ;;
+  check) require_root; load_config; with_lock; check_updates ;;
+  download) require_root; load_config; with_lock; download_updates ;;
+  apply) apply_updates ;;
+  rollback) rollback "${2:-}" ;;
+  automatic) automatic ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
