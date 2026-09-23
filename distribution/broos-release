@@ -17,12 +17,8 @@ load_config() {
   CHANNEL=stable
   AUTOMATIC_DOWNLOAD=yes
   AUTOMATIC_APPLY=no
-  MAINTENANCE_WINDOW_START=02:00
-  MAINTENANCE_WINDOW_END=04:00
   HEALTH_TIMEOUT_SECONDS=300
   RETAIN_RELEASES=2
-  UPDATE_ORIGIN=Broos
-  UPDATE_LABEL='Broos Cloud'
   BROOS_PACKAGES='broos-release broos-console'
   if [ -r "$CONFIG_FILE" ]; then
     # The package owns this root-writable file. Do not point it at user content.
@@ -36,6 +32,7 @@ load_config() {
       *) fail "unsupported package in BROOS_PACKAGES: $package" ;;
     esac
   done
+  export HEALTH_TIMEOUT_SECONDS RETAIN_RELEASES
 }
 
 require_root() { [ "$(id -u)" -eq 0 ] || fail 'this operation requires root'; }
