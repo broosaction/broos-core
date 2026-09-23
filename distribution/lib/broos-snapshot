@@ -72,7 +72,7 @@ restore_snapshot() {
   # shellcheck disable=SC2086
   dpkg -i $debs || apt-get -f install --yes
   tar --acls --xattrs --numeric-owner -xzf "$path/configuration.tar.gz" -C /
-  systemctl daemon-reload
+  systemctl daemon-reload 2>/dev/null || true
   systemctl try-restart broos-core.service 2>/dev/null || true
   log "restored $path"
 }
