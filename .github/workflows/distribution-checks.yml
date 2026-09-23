@@ -62,8 +62,9 @@ jobs:
             build/apt-public/dists/preview/InRelease
           test -s build/apt-public/dists/preview/main/binary-amd64/Packages
           test -s build/apt-public/dists/preview/main/binary-arm64/Packages
+          sudo install -m 0644 ../console-fixture/public.gpg /usr/share/keyrings/broos-ci.gpg
           printf 'deb [signed-by=%s] file://%s preview main\n' \
-            "$PWD/../console-fixture/public.gpg" "$PWD/build/apt-public" > build/test.list
+            /usr/share/keyrings/broos-ci.gpg "$PWD/build/apt-public" > build/test.list
           sudo apt-get update -o Dir::Etc::sourcelist="$PWD/build/test.list" \
             -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
 
