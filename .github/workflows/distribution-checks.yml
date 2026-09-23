@@ -27,6 +27,7 @@ jobs:
           npx --yes shellcheck@4.1.0 distribution/broos-release
       - name: Validate systemd units
         run: |
+          sudo install -m 0755 distribution/broos-release /usr/bin/broos-release
           systemd-analyze verify distribution/broos-update.service
           systemd-analyze verify distribution/broos-update.timer
       - name: Validate JSON schema syntax
